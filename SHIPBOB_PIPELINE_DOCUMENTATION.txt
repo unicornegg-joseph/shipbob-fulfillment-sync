@@ -1,0 +1,353 @@
+ShipBob Fulfillment Cost Pipeline — Full Technical Documentation
+================================================================
+Project: Love in Faith (LiF) — Multi-Brand Fulfillment Analytics
+Author: Antigravity (AI Engineering Assistant)
+Date Created: April 14, 2026
+Last Updated: April 14, 2026
+
+
+────────────────────────────────────────────────────────────
+SECTION 1: OVERVIEW
+────────────────────────────────────────────────────────────
+
+This pipeline pulls fulfillment cost data from the ShipBob API for three brands
+(4GVN, LiF, GLO) and stores them in Google BigQuery. It is automated via a
+Google Cloud Function (GCF) triggered every night at 12:45 AM PST.
+
+Strategy: 3-Day Lookback Sync
+- Pulls orders from the last 3 days on each run (not just yesterday).
+- Catches late invoice finalization: orders fulfilled today may not have a cost
+  until ShipBob's billing runs 24-48 hours later.
+- Self-healing: if a nightly run fails, the next run will recover the missed day.
+- Deduplication: uses Delete-then-Insert (Upsert) logic to prevent double-counting.
+
+
+────────────────────────────────────────────────────────────
+SECTION 2: BIGQUERY TABLES
+────────────────────────────────────────────────────────────
+
+Project ID: lifbq-407915
+Dataset:    shipbob
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Brand  │ Full Table ID                                               │
+├─────────────────────────────────────────────────────────────────────┤
+│ 4GVN   │ lifbq-407915.shipbob.4gvn_fulfillment_cost                 │
+│ LiF    │ lifbq-407915.shipbob.lif_fulfillment_cost                  │
+│ GLO    │ lifbq-407915.shipbob.glo_fulfillment_cost                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+Table Schema (identical for all 3 brands):
+┌─────────────────┬───────────┬──────────────────────────────────────────┐
+│ Column Name     │ Type      │ Description                              │
+├─────────────────┼───────────┼──────────────────────────────────────────┤
+│ order_id                                 │ STRING    │ ShipBob internal order ID                │
+│ order_number                             │ STRING    │ Customer-facing order number             │
+│ status                                   │ STRING    │ Order status (Fulfilled, Cancelled, etc) │
+│ purchase_date                            │ TIMESTAMP │ Date the purchase was triggered          │
+│ created_date                             │ TIMESTAMP │ When the order was created               │
+│ shipment_id                              │ STRING    │ Individual shipment ID                   │
+│ shipment_status                          │ STRING    │ Shipment status (Completed, etc)         │
+│ invoice_amount                           │ FLOAT     │ Actual fulfillment cost billed           │
+│ ingested_at                              │ TIMESTAMP │ When this row was written to BigQuery    │
+└──────────────────────────────────────────┴───────────┴──────────────────────────────────────────┘
+
+Direct BigQuery Console Links:
+- 4GVN: https://console.cloud.google.com/bigquery?project=lifbq-407915&ws=!1m5!1m4!4m3!1slifbq-407915!2sshipbob!3s4gvn_fulfillment_cost
+- LiF:  https://console.cloud.google.com/bigquery?project=lifbq-407915&ws=!1m5!1m4!4m3!1slifbq-407915!2sshipbob!3slif_fulfillment_cost
+- GLO:  https://console.cloud.google.com/bigquery?project=lifbq-407915&ws=!1m5!1m4!4m3!1slifbq-407915!2sshipbob!3sglo_fulfillment_cost
+
+Initial Backfill: March 3, 2026 to April 14, 2026
+Note: March 3, 2026 is the earliest date ShipBob has data for these accounts.
+      This was confirmed via API diagnostic on April 14, 2026.
+Row Counts (as of April 14, 2026):
+  - 4GVN: 296 rows (earliest: Mar 3, 2026)
+  - LiF:  250 rows (earliest: Apr 13, 2026)
+  - GLO:  261 rows (earliest: Apr 13, 2026)
+
+
+────────────────────────────────────────────────────────────
+SECTION 3: GOOGLE SECRET MANAGER (API TOKENS)
+────────────────────────────────────────────────────────────
+
+The ShipBob Personal Access Tokens (PATs) are stored securely in GCP Secret Manager.
+They are NOT stored in code. The Cloud Function reads them via environment variable mapping.
+
+┌────────────────────┬──────────────┬────────────────┐
+│ Secret Name        │ Brand        │ Version Active │
+├────────────────────┼──────────────┼────────────────┤
+│ SHIPBOB_PAT_4GVN   │ 4GVN         │ latest (v2)    │
+│ SHIPBOB_PAT_LIF    │ LiF          │ latest (v2)    │
+│ SHIPBOB_PAT_GLO    │ GLO          │ latest (v2)    │
+└────────────────────┴──────────────┴────────────────┘
+
+Console Link: https://console.cloud.google.com/security/secret-manager?project=lifbq-407915
+
+
+────────────────────────────────────────────────────────────
+SECTION 4: GOOGLE CLOUD FUNCTION (GCF)
+────────────────────────────────────────────────────────────
+
+Function Name:    shipbob-fulfillment-daily-sync
+Region:           us-central1
+Runtime:          Python 3.11
+Entry Point:      shipbob_daily_sync
+Trigger:          HTTP (called by Cloud Scheduler via OIDC auth)
+Status:           ACTIVE
+Service Account:  lifbq-407915@appspot.gserviceaccount.com
+
+GCP Console Link:
+https://console.cloud.google.com/functions/details/us-central1/shipbob-fulfillment-daily-sync?project=lifbq-407915
+
+HTTP Trigger URL (authenticated — do not open in browser):
+https://us-central1-lifbq-407915.cloudfunctions.net/shipbob-fulfillment-daily-sync
+
+Secrets Mapped as Environment Variables:
+  - SHIPBOB_PAT_4GVN  →  Secret: SHIPBOB_PAT_4GVN (latest)
+  - SHIPBOB_PAT_LIF   →  Secret: SHIPBOB_PAT_LIF (latest)
+  - SHIPBOB_PAT_GLO   →  Secret: SHIPBOB_PAT_GLO (latest)
+
+
+────────────────────────────────────────────────────────────
+SECTION 5: CLOUD SCHEDULER
+────────────────────────────────────────────────────────────
+
+Job Name:   shipbob-daily-sync-job
+Schedule:   45 0 * * *   (12:45 AM daily)
+Timezone:   America/Los_Angeles (PST)
+State:      ENABLED
+Target:     HTTP POST → GCF trigger URL (authenticated via OIDC)
+
+GCP Console Link:
+https://console.cloud.google.com/cloudscheduler?project=lifbq-407915
+
+
+────────────────────────────────────────────────────────────
+SECTION 6: HOW TO MANUALLY TRIGGER THE SYNC
+────────────────────────────────────────────────────────────
+
+Option A — Via gcloud CLI (Recommended):
+  Run this command in any terminal authenticated with your GCP account:
+
+    gcloud scheduler jobs run shipbob-daily-sync-job --location us-central1 --project "lifbq-407915"
+
+  This fires the Cloud Scheduler immediately, which calls the Cloud Function.
+
+Option B — Via GCP Console (No Terminal):
+  1. Go to: https://console.cloud.google.com/cloudscheduler?project=lifbq-407915
+  2. Find the job: shipbob-daily-sync-job
+  3. Click the three-dot menu (⋮) on the right
+  4. Click "Force run"
+  5. Confirm. The function will run within 30 seconds.
+
+How to verify it worked:
+  Run this query in BigQuery after triggering:
+
+    SELECT
+      '4GVN' as brand, COUNT(*) as rows, MAX(ingested_at) as last_sync
+    FROM `lifbq-407915.shipbob.4gvn_fulfillment_cost`
+    UNION ALL
+    SELECT
+      'LIF' as brand, COUNT(*) as rows, MAX(ingested_at) as last_sync
+    FROM `lifbq-407915.shipbob.lif_fulfillment_cost`
+    UNION ALL
+    SELECT
+      'GLO' as brand, COUNT(*) as rows, MAX(ingested_at) as last_sync
+    FROM `lifbq-407915.shipbob.glo_fulfillment_cost`
+    ORDER BY brand
+
+  The ingested_at column should reflect the current timestamp.
+
+
+────────────────────────────────────────────────────────────
+SECTION 7: SOURCE CODE FILES
+────────────────────────────────────────────────────────────
+
+All files are saved at:
+  Retool Development/4GVN shipment/
+
+── main.py ──────────────────────────────────────────────────
+
+import os
+import json
+import requests
+import time
+from google.cloud import bigquery
+from datetime import datetime, timedelta
+
+# GCP Configuration
+PROJECT_ID = "lifbq-407915"
+DATASET_ID = "shipbob"
+BRAND_TOKEN_MAP = {
+    "4gvn": "SHIPBOB_PAT_4GVN",
+    "lif":  "SHIPBOB_PAT_LIF",
+    "glo":  "SHIPBOB_PAT_GLO"
+}
+
+def shipbob_daily_sync(event, context):
+    """
+    Cloud Function entry point.
+    Triggered by Cloud Scheduler every 24 hours at 12:45 AM PST.
+    Syncs last 3 days of ShipBob fulfillment data to BigQuery for all brands.
+    """
+    client = bigquery.Client(project=PROJECT_ID)
+
+    # 3-Day Lookback to catch late invoice finalization
+    lookback_date = (datetime.utcnow() - timedelta(days=3)).strftime('%Y-%m-%dT00:00:00')
+    # Note: Earliest available ShipBob data is March 3, 2026 (confirmed via API diagnostic)
+
+    for brand, secret_env_var in BRAND_TOKEN_MAP.items():
+        print(f"--- Starting Sync for Brand: {brand.upper()} ---")
+
+        # 1. Get token from environment variable (mapped from Secret Manager)
+        token = os.getenv(secret_env_var)
+        if not token:
+            print(f"[ERROR] Environment variable {secret_env_var} not found. Skipping {brand}.")
+            continue
+
+        # 2. API Setup
+        url = "https://api.shipbob.com/2026-01/order"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        params = {"StartDate": lookback_date, "Limit": 250}
+
+        all_fresh_rows = []
+        page = 1
+
+        # 3. Paginated fetch from ShipBob
+        while url:
+            try:
+                print(f"  Fetching {brand} page {page}...")
+                resp = requests.get(url, headers=headers, params=params if page == 1 else None, timeout=30)
+
+                if resp.status_code != 200:
+                    print(f"  [ERROR] API {resp.status_code}: {resp.text}")
+                    break
+
+                orders = resp.json()
+                if not orders:
+                    break
+
+                for order in orders:
+                    shipments = order.get('shipments', [])
+                    if not shipments:
+                        all_fresh_rows.append({
+                            "order_id": str(order['id']),
+                            "order_number": str(order.get('order_number') or ''),
+                            "status": order.get('status'),
+                            "created_date": order.get('created_date'),
+                            "shipment_id": None,
+                            "shipment_status": None,
+                            "invoice_amount": 0.0,
+                            "shipped_date": None,
+                            "ingested_at": datetime.utcnow().isoformat()
+                        })
+                    else:
+                        for s in shipments:
+                            all_fresh_rows.append({
+                                "order_id": str(order['id']),
+                                "order_number": str(order.get('order_number') or ''),
+                                "status": order.get('status'),
+                                "created_date": order.get('created_date'),
+                                "shipment_id": str(s.get('id')),
+                                "shipment_status": s.get('status'),
+                                "invoice_amount": float(s.get('invoice_amount') or 0.0),
+                                "shipped_date": s.get('shipped_date'),
+                                "ingested_at": datetime.utcnow().isoformat()
+                            })
+
+                # Check for next page in Link header
+                url = None
+                link_header = resp.headers.get('Link')
+                if link_header:
+                    for link in link_header.split(','):
+                        if 'rel="next"' in link:
+                            url = link.split(';')[0].strip('< >')
+                            page += 1
+                            break
+
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"  [EXCEPTION] {e}")
+                break
+
+        # 4. Upsert into BigQuery (Delete then Insert)
+        if all_fresh_rows:
+            table_id = f"{PROJECT_ID}.{DATASET_ID}.{brand}_fulfillment_cost"
+            order_ids = list(set([row['order_id'] for row in all_fresh_rows]))
+
+            # Delete existing records for these orders (deduplication)
+            delete_query = f"DELETE FROM `{table_id}` WHERE order_id IN UNNEST({json.dumps(order_ids)})"
+            client.query(delete_query).result()
+            print(f"  Cleared {len(order_ids)} existing records for deduplication.")
+
+            # Insert fresh data
+            job_config = bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                autodetect=True
+            )
+            client.load_table_from_json(all_fresh_rows, table_id, job_config=job_config).result()
+            print(f"  SUCCESS: Ingested {len(all_fresh_rows)} records for {brand}.")
+        else:
+            print(f"  INFO: No shipments found for {brand} in the lookback window.")
+
+    return "Sync Complete"
+
+── requirements.txt ─────────────────────────────────────────
+
+requests>=2.31.0
+google-cloud-bigquery>=3.13.0
+
+── backfill_2026_all_brands.py ──────────────────────────────
+(One-time backfill script — not part of the live function)
+Pulls all ShipBob data from Mar 3, 2026 (earliest available) to present day for all 3 brands
+and loads them into BigQuery with a WRITE_TRUNCATE (full replace).
+File location: Retool Development/4GVN shipment/backfill_2026_all_brands.py
+
+── test_additional_brands.py ────────────────────────────────
+(Diagnostic script — verifies API connectivity for LiF and GLO)
+Tests that SHIPBOB_PAT_LIF and SHIPBOB_PAT_GLO are valid and can return orders.
+File location: Retool Development/4GVN shipment/test_additional_brands.py
+
+── test_shipbob_connection.py ───────────────────────────────
+(Diagnostic script — original 4GVN connection test)
+Verifies that SHIPBOB_PAT_4GVN can be retrieved from Secret Manager
+and successfully calls the ShipBob API.
+File location: Retool Development/4GVN shipment/test_shipbob_connection.py
+
+── setup_permanent_tables.py ────────────────────────────────
+(One-time setup script — creates the BigQuery schema)
+Creates all 3 brand tables in lifbq-407915.shipbob with the standard schema.
+File location: Retool Development/4GVN shipment/setup_permanent_tables.py
+
+
+────────────────────────────────────────────────────────────
+SECTION 8: TROUBLESHOOTING
+────────────────────────────────────────────────────────────
+
+Issue: invoice_amount is showing $0.00 for some orders
+→ Expected. Orders with status "Processing" have not been invoiced yet.
+   ShipBob finalizes costs after the carrier scans the package.
+   The 3-day lookback window is designed to catch these updates automatically.
+
+Issue: Cloud Function returned a 403 error when triggered manually via browser
+→ Expected. The function requires OIDC authentication.
+   Use "gcloud scheduler jobs run" or the GCP Console "Force run" button instead.
+
+Issue: A brand shows 0 rows after a sync
+→ Check if ShipBob had a 500 error (API instability). This has been observed
+   occasionally on the GLO account. The next scheduled run will retry automatically.
+   To force a re-sync immediately, use Option A or B in Section 6.
+
+Issue: Duplicate rows in BigQuery
+→ Should not happen with the current Upsert logic. If observed, run:
+   DELETE FROM `lifbq-407915.shipbob.{brand}_fulfillment_cost`
+   WHERE ingested_at < (SELECT MAX(ingested_at) FROM `lifbq-407915.shipbob.{brand}_fulfillment_cost`)
+   AND order_id IN (SELECT order_id FROM ... GROUP BY order_id HAVING COUNT(*) > 1)
+
+
+────────────────────────────────────────────────────────────
+END OF DOCUMENT
+────────────────────────────────────────────────────────────
