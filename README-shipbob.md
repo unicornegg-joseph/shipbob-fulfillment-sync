@@ -17,3 +17,15 @@ This Google Cloud Function is responsible for the daily synchronization of fulfi
 ## 📁 Repository Structure
 * `main.py` - Contains the primary Cloud Function logic.
 * `SHIPBOB_PIPELINE_DOCUMENTATION.txt` - Historical pipeline configurations and notes.
+
+## 🛠️ Deployment
+
+This project uses a PowerShell script to automate the deployment to Google Cloud Functions (Gen 2).
+
+**To deploy updates:**
+1. Open your terminal or PowerShell.
+2. Ensure you are authenticated with Google Cloud (`gcloud auth login`).
+3. Run the deployment script:
+   ```powershell
+   ./deploy.ps1
+
